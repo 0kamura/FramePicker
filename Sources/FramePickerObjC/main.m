@@ -7,8 +7,11 @@
 
 @interface FPPaddedButton : NSButton
 @property NSString *instantToolTipText;
-@property NSTrackingArea *instantToolTipTrackingArea;
 @property NSPopover *instantToolTipPopover;
+@property id instantToolTipMouseMonitor;
+@property BOOL instantToolTipPointerInside;
+- (void)showInstantToolTip;
+- (void)hideInstantToolTip;
 @end
 
 @implementation FPPaddedButton
@@ -17,21 +20,20 @@
     if (size.height != NSViewNoIntrinsicMetric) size.height += 8;
     return size;
 }
-- (void)updateTrackingAreas {
-    [super updateTrackingAreas];
-    if (self.instantToolTipTrackingArea) [self removeTrackingArea:self.instantToolTipTrackingArea];
-    self.instantToolTipTrackingArea = [[NSTrackingArea alloc] initWithRect:NSZeroRect options:NSTrackingMouseEnteredAndExited|NSTrackingActiveInActiveApp|NSTrackingInVisibleRect owner:self userInfo:nil];
-    [self addTrackingArea:self.instantToolTipTrackingArea];
+- (void)viewDidMoveToWindow {
+    [super viewDidMoveToWindow]; if (self.instantToolTipMouseMonitor) { [NSEvent removeMonitor:self.instantToolTipMouseMonitor]; self.instantToolTipMouseMonitor = nil; }
+    if (!self.window || !self.instantToolTipText.length) return; self.window.acceptsMouseMovedEvents = YES; __weak typeof(self) weak = self;
+    self.instantToolTipMouseMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskMouseMoved handler:^NSEvent *(NSEvent *event) { typeof(self) strong = weak; if (!strong || event.window != strong.window) return event; NSPoint point = [strong convertPoint:event.locationInWindow fromView:nil]; BOOL inside = NSPointInRect(point, strong.bounds) && !strong.hiddenOrHasHiddenAncestor; if (inside && !strong.instantToolTipPointerInside) { strong.instantToolTipPointerInside = YES; [strong showInstantToolTip]; } else if (!inside && strong.instantToolTipPointerInside) { strong.instantToolTipPointerInside = NO; [strong hideInstantToolTip]; } return event; }];
 }
-- (void)viewDidMoveToWindow { [super viewDidMoveToWindow]; [self updateTrackingAreas]; }
-- (void)mouseEntered:(NSEvent *)event {
-    [super mouseEntered:event]; if (!self.instantToolTipText.length) return;
+- (void)showInstantToolTip {
+    if (!self.instantToolTipText.length || self.instantToolTipPopover.shown) return;
     NSTextField *label = [NSTextField labelWithString:self.instantToolTipText]; label.font = [NSFont systemFontOfSize:11]; [label sizeToFit];
     NSView *content = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, label.frame.size.width + 16, label.frame.size.height + 10)]; label.frame = NSMakeRect(8, 5, label.frame.size.width, label.frame.size.height); [content addSubview:label];
     NSViewController *controller = [NSViewController new]; controller.view = content; NSPopover *popover = [NSPopover new]; popover.animates = NO; popover.behavior = NSPopoverBehaviorTransient; popover.contentSize = content.frame.size; popover.contentViewController = controller; self.instantToolTipPopover = popover;
     [popover showRelativeToRect:self.bounds ofView:self preferredEdge:NSRectEdgeMinY];
 }
-- (void)mouseExited:(NSEvent *)event { [super mouseExited:event]; [self.instantToolTipPopover close]; self.instantToolTipPopover = nil; }
+- (void)hideInstantToolTip { [self.instantToolTipPopover close]; self.instantToolTipPopover = nil; }
+- (void)dealloc { if (self.instantToolTipMouseMonitor) [NSEvent removeMonitor:self.instantToolTipMouseMonitor]; }
 @end
 
 @interface FPDropView : NSView <NSDraggingDestination>
@@ -128,6 +130,7 @@
 @property NSUInteger timelineGeneration;
 @property NSInteger sampleFPS;
 @property id keyMonitor;
+@property NSPanel *confirmationPanel;
 @property NSURL *outputURL;
 @end
 
@@ -182,7 +185,7 @@
 }
 - (NSButton *)icon:(NSString *)symbol action:(SEL)action help:(NSString *)help {
     FPPaddedButton *v = [FPPaddedButton buttonWithImage:[NSImage imageWithSystemSymbolName:symbol accessibilityDescription:help] target:self action:action];
-    v.bezelStyle = NSBezelStyleInline; v.instantToolTipText = help; return v;
+    v.bezelStyle = NSBezelStyleInline; v.toolTip = help; return v;
 }
 
 - (void)buildWindow {
@@ -217,7 +220,7 @@
     NSView *v = [NSView new];
     NSTextField *heading = [self label:@"選択フレーム" size:18 weight:NSFontWeightSemibold];
     self.countLabel = [self label:@"0枚" size:12 weight:NSFontWeightRegular]; self.countLabel.textColor = NSColor.secondaryLabelColor;
-    self.clipboardButton = [self icon:@"doc.on.doc" action:@selector(copyAllFrames:) help:@"すべてクリップボードにコピー"]; self.clipboardButton.enabled = NO;
+    self.clipboardButton = [self icon:@"doc.on.doc" action:@selector(copyAllFrames:) help:@"すべてクリップボードにコピー"]; self.clipboardButton.toolTip = nil; ((FPPaddedButton *)self.clipboardButton).instantToolTipText = @"すべてクリップボードにコピー"; self.clipboardButton.enabled = NO;
     self.exportButton = [self button:@"PNGを書き出す" symbol:@"square.and.arrow.down" action:@selector(exportFrames:)]; self.exportButton.enabled = NO;
     NSStackView *summary = [NSStackView stackViewWithViews:@[self.countLabel, [NSView new], self.clipboardButton, self.exportButton]]; summary.alignment = NSLayoutAttributeCenterY; summary.spacing = 6; summary.translatesAutoresizingMaskIntoConstraints = NO;
     self.progress = [NSProgressIndicator new]; self.progress.indeterminate = NO; self.progress.minValue = 0; self.progress.maxValue = 1; self.progress.hidden = YES; self.progress.translatesAutoresizingMaskIntoConstraints = NO;
@@ -525,19 +528,27 @@
     [svg appendString:@"</svg>"]; return svg;
 }
 
-- (void)writeImagesToPasteboard:(NSArray<NSImage *> *)images {
-    if (!images.count) { NSBeep(); return; }
+- (BOOL)writeImagesToPasteboard:(NSArray<NSImage *> *)images {
+    if (!images.count) { NSBeep(); return NO; }
     NSPasteboard *pasteboard = NSPasteboard.generalPasteboard; [pasteboard clearContents];
-    if (images.count == 1) { [pasteboard writeObjects:@[images.firstObject]]; return; }
-    NSString *svg = [self svgForImages:images]; if (!svg) { NSBeep(); return; }
+    if (images.count == 1) { BOOL copied = [pasteboard writeObjects:@[images.firstObject]]; if (copied) [self showCopyConfirmation]; return copied; }
+    NSString *svg = [self svgForImages:images]; if (!svg) { NSBeep(); return NO; }
     NSPasteboardItem *item = [NSPasteboardItem new]; NSData *svgData = [svg dataUsingEncoding:NSUTF8StringEncoding];
-    [item setData:svgData forType:@"public.svg-image"]; [item setString:svg forType:NSPasteboardTypeString]; [item setString:[NSString stringWithFormat:@"<html><body>%@</body></html>",svg] forType:NSPasteboardTypeHTML]; [pasteboard writeObjects:@[item]];
+    [item setData:svgData forType:@"public.svg-image"]; [item setString:svg forType:NSPasteboardTypeString]; [item setString:[NSString stringWithFormat:@"<html><body>%@</body></html>",svg] forType:NSPasteboardTypeHTML]; BOOL copied = [pasteboard writeObjects:@[item]]; if (copied) [self showCopyConfirmation]; return copied;
+}
+
+- (void)showCopyConfirmation {
+    [(FPPaddedButton *)self.clipboardButton hideInstantToolTip]; if (self.confirmationPanel) { [self.window removeChildWindow:self.confirmationPanel]; [self.confirmationPanel orderOut:nil]; }
+    NSSize size = NSMakeSize(108, 28); NSRect windowFrame = self.window.frame; NSRect frame = NSMakeRect(NSMidX(windowFrame) - size.width / 2, NSMinY(windowFrame) + 18, size.width, size.height); NSPanel *panel = [[NSPanel alloc] initWithContentRect:frame styleMask:NSWindowStyleMaskBorderless|NSWindowStyleMaskNonactivatingPanel backing:NSBackingStoreBuffered defer:NO]; panel.opaque = NO; panel.backgroundColor = NSColor.clearColor; panel.hasShadow = YES; panel.ignoresMouseEvents = YES;
+    NSView *background = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, size.width, size.height)]; background.wantsLayer = YES; background.layer.backgroundColor = [NSColor colorWithWhite:0.12 alpha:.9].CGColor; background.layer.cornerRadius = 7; NSTextField *label = [NSTextField labelWithString:@"コピーしました"]; label.font = [NSFont systemFontOfSize:11 weight:NSFontWeightMedium]; label.textColor = NSColor.whiteColor; label.alignment = NSTextAlignmentCenter; label.frame = NSMakeRect(8, 6, size.width - 16, 16); [background addSubview:label]; panel.contentView = background; self.confirmationPanel = panel; [self.window addChildWindow:panel ordered:NSWindowAbove]; [panel orderFront:nil];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ if (self.confirmationPanel == panel) { [self.window removeChildWindow:panel]; [panel orderOut:nil]; self.confirmationPanel = nil; } });
 }
 
 - (void)copySelectedFrames:(id)sender {
-    if (!self.selectedCapturedIndexes.count) { NSBeep(); return; }
-    NSMutableArray<NSImage *> *images = [NSMutableArray arrayWithCapacity:self.selectedCapturedIndexes.count];
-    [self.selectedCapturedIndexes enumerateIndexesUsingBlock:^(NSUInteger index, BOOL *stop) { if (index < self.frames.count) [images addObject:self.frames[index][@"image"]]; }];
+    NSMutableArray<NSImage *> *images = [NSMutableArray array];
+    if (self.selectedCapturedIndexes.count) [self.selectedCapturedIndexes enumerateIndexesUsingBlock:^(NSUInteger index, BOOL *stop) { if (index < self.frames.count) [images addObject:self.frames[index][@"image"]]; }];
+    else if (self.selectedTimelineIndex >= 0 && self.selectedTimelineIndex < self.timelineFrames.count) [images addObject:self.timelineFrames[self.selectedTimelineIndex][@"image"]];
+    if (!images.count) { NSBeep(); return; }
     [self writeImagesToPasteboard:images];
 }
 
