@@ -547,7 +547,7 @@
 - (void)copySelectedFrames:(id)sender {
     NSMutableArray<NSImage *> *images = [NSMutableArray array];
     if (self.selectedCapturedIndexes.count) [self.selectedCapturedIndexes enumerateIndexesUsingBlock:^(NSUInteger index, BOOL *stop) { if (index < self.frames.count) [images addObject:self.frames[index][@"image"]]; }];
-    else if (self.selectedTimelineIndex >= 0 && self.selectedTimelineIndex < self.timelineFrames.count) [images addObject:self.timelineFrames[self.selectedTimelineIndex][@"image"]];
+    else if (self.selectedTimelineIndex >= 0 && self.selectedTimelineIndex < self.timelineFrames.count) { double time = [self.timelineFrames[self.selectedTimelineIndex][@"time"] doubleValue]; NSImage *fullResolutionImage = [self imageAt:time]; if (fullResolutionImage) [images addObject:fullResolutionImage]; }
     if (!images.count) { NSBeep(); return; }
     [self writeImagesToPasteboard:images];
 }
