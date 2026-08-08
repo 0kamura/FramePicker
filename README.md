@@ -26,9 +26,10 @@ iPhoneの画面収録またはMac上の動画から、UI確認に必要なフレ
 ## ビルド
 
 ```sh
-cd /Users/Shared/Projects/Products/FramePicker
-zsh /Users/Shared/Projects/Products/FramePicker/scripts/build-app.sh
-open /Users/Shared/Projects/Products/FramePicker/dist/FramePicker.app
+git clone https://github.com/0kamura/FramePicker.git
+cd FramePicker
+zsh scripts/build-app.sh
+open dist/FramePicker.app
 ```
 
 初回にiPhoneの画面収録を開くときは、macOSの写真アクセス確認で許可してください。

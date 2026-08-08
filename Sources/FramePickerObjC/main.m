@@ -6,6 +6,9 @@
 #import <float.h>
 
 @interface FPPaddedButton : NSButton
+@property NSString *instantToolTipText;
+@property NSTrackingArea *instantToolTipTrackingArea;
+@property NSPopover *instantToolTipPopover;
 @end
 
 @implementation FPPaddedButton
@@ -14,6 +17,21 @@
     if (size.height != NSViewNoIntrinsicMetric) size.height += 8;
     return size;
 }
+- (void)updateTrackingAreas {
+    [super updateTrackingAreas];
+    if (self.instantToolTipTrackingArea) [self removeTrackingArea:self.instantToolTipTrackingArea];
+    self.instantToolTipTrackingArea = [[NSTrackingArea alloc] initWithRect:NSZeroRect options:NSTrackingMouseEnteredAndExited|NSTrackingActiveInActiveApp|NSTrackingInVisibleRect owner:self userInfo:nil];
+    [self addTrackingArea:self.instantToolTipTrackingArea];
+}
+- (void)viewDidMoveToWindow { [super viewDidMoveToWindow]; [self updateTrackingAreas]; }
+- (void)mouseEntered:(NSEvent *)event {
+    [super mouseEntered:event]; if (!self.instantToolTipText.length) return;
+    NSTextField *label = [NSTextField labelWithString:self.instantToolTipText]; label.font = [NSFont systemFontOfSize:11]; [label sizeToFit];
+    NSView *content = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, label.frame.size.width + 16, label.frame.size.height + 10)]; label.frame = NSMakeRect(8, 5, label.frame.size.width, label.frame.size.height); [content addSubview:label];
+    NSViewController *controller = [NSViewController new]; controller.view = content; NSPopover *popover = [NSPopover new]; popover.animates = NO; popover.behavior = NSPopoverBehaviorTransient; popover.contentSize = content.frame.size; popover.contentViewController = controller; self.instantToolTipPopover = popover;
+    [popover showRelativeToRect:self.bounds ofView:self preferredEdge:NSRectEdgeMinY];
+}
+- (void)mouseExited:(NSEvent *)event { [super mouseExited:event]; [self.instantToolTipPopover close]; self.instantToolTipPopover = nil; }
 @end
 
 @interface FPDropView : NSView <NSDraggingDestination>
@@ -163,8 +181,8 @@
     return v;
 }
 - (NSButton *)icon:(NSString *)symbol action:(SEL)action help:(NSString *)help {
-    NSButton *v = [FPPaddedButton buttonWithImage:[NSImage imageWithSystemSymbolName:symbol accessibilityDescription:help] target:self action:action];
-    v.bezelStyle = NSBezelStyleInline; v.toolTip = help; return v;
+    FPPaddedButton *v = [FPPaddedButton buttonWithImage:[NSImage imageWithSystemSymbolName:symbol accessibilityDescription:help] target:self action:action];
+    v.bezelStyle = NSBezelStyleInline; v.instantToolTipText = help; return v;
 }
 
 - (void)buildWindow {
