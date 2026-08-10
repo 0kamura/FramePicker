@@ -18,6 +18,8 @@ clang \
     -target arm64-apple-macos14.0 \
     -o "$build_dir/FramePicker" \
     "$project_dir/Sources/FramePickerObjC/main.m" \
+    "$project_dir/Sources/FramePickerObjC/LatestVideoRequest.m" \
+    "$project_dir/Sources/FramePickerObjC/ClipboardEncoder.m" \
     -framework Cocoa \
     -framework AVFoundation \
     -framework AVKit \

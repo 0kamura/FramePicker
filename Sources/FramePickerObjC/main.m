@@ -4,6 +4,8 @@
 #import <Photos/Photos.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <float.h>
+#import "ClipboardEncoder.h"
+#import "LatestVideoRequest.h"
 
 @interface FPPaddedButton : NSButton
 @property NSString *instantToolTipText;
@@ -118,8 +120,10 @@
 @property NSTextField *titleLabel, *sourceLabel, *emptyLabel, *countLabel, *timeLabel, *statusLabel, *timelineCaption;
 @property NSSlider *slider;
 @property NSSegmentedControl *densityControl;
-@property NSButton *exportButton, *clipboardButton, *finderButton;
+@property NSButton *exportButton, *clipboardButton, *finderButton, *playPauseButton;
 @property NSProgressIndicator *progress;
+@property NSProgressIndicator *sourceLoadingIndicator;
+@property NSProgressIndicator *clipboardLoadingIndicator;
 @property NSStackView *selectedStack, *sequence, *historyStack;
 @property NSScrollView *timelineScroll;
 @property NSView *selectionPanel, *historyPanel;
@@ -128,6 +132,10 @@
 @property NSInteger selectedCapturedIndex;
 @property NSMutableIndexSet *selectedCapturedIndexes;
 @property NSUInteger timelineGeneration;
+@property NSUInteger latestVideoRequestGeneration;
+@property NSUInteger latestVideoActivityGeneration;
+@property PHImageRequestID latestVideoRequestID;
+@property BOOL copyInProgress;
 @property NSInteger sampleFPS;
 @property id keyMonitor;
 @property NSPanel *confirmationPanel;
@@ -146,6 +154,7 @@
     __weak typeof(self) weak = self;
     self.timeObserver = [self.player addPeriodicTimeObserverForInterval:CMTimeMake(1, 30) queue:dispatch_get_main_queue() usingBlock:^(CMTime t) {
         [weak updateTime:CMTimeGetSeconds(t)];
+        [weak updatePlaybackButton];
     }];
     self.keyMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown handler:^NSEvent *(NSEvent *event) {
         NSEventModifierFlags modifiers = event.modifierFlags & NSEventModifierFlagDeviceIndependentFlagsMask;
@@ -164,6 +173,7 @@
 - (void)applicationWillTerminate:(NSNotification *)note {
     if (self.timeObserver) [self.player removeTimeObserver:self.timeObserver];
     if (self.keyMonitor) [NSEvent removeMonitor:self.keyMonitor];
+    if (self.latestVideoRequestID != PHInvalidImageRequestID) [[PHImageManager defaultManager] cancelImageRequest:self.latestVideoRequestID];
     [[PHPhotoLibrary sharedPhotoLibrary] unregisterChangeObserver:self];
 }
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)sender { return YES; }
@@ -221,8 +231,9 @@
     NSTextField *heading = [self label:@"選択フレーム" size:18 weight:NSFontWeightSemibold];
     self.countLabel = [self label:@"0枚" size:12 weight:NSFontWeightRegular]; self.countLabel.textColor = NSColor.secondaryLabelColor;
     self.clipboardButton = [self icon:@"doc.on.doc" action:@selector(copyAllFrames:) help:@"すべてクリップボードにコピー"]; self.clipboardButton.toolTip = nil; ((FPPaddedButton *)self.clipboardButton).instantToolTipText = @"すべてクリップボードにコピー"; self.clipboardButton.enabled = NO;
+    self.clipboardLoadingIndicator = [NSProgressIndicator new]; self.clipboardLoadingIndicator.style = NSProgressIndicatorStyleSpinning; self.clipboardLoadingIndicator.controlSize = NSControlSizeSmall; self.clipboardLoadingIndicator.indeterminate = YES; self.clipboardLoadingIndicator.hidden = YES;
     self.exportButton = [self button:@"PNGを書き出す" symbol:@"square.and.arrow.down" action:@selector(exportFrames:)]; self.exportButton.enabled = NO;
-    NSStackView *summary = [NSStackView stackViewWithViews:@[self.countLabel, [NSView new], self.clipboardButton, self.exportButton]]; summary.alignment = NSLayoutAttributeCenterY; summary.spacing = 6; summary.translatesAutoresizingMaskIntoConstraints = NO;
+    NSStackView *summary = [NSStackView stackViewWithViews:@[self.countLabel, [NSView new], self.clipboardLoadingIndicator, self.clipboardButton, self.exportButton]]; summary.alignment = NSLayoutAttributeCenterY; summary.spacing = 6; summary.translatesAutoresizingMaskIntoConstraints = NO;
     self.progress = [NSProgressIndicator new]; self.progress.indeterminate = NO; self.progress.minValue = 0; self.progress.maxValue = 1; self.progress.hidden = YES; self.progress.translatesAutoresizingMaskIntoConstraints = NO;
     self.selectedStack = [NSStackView new]; self.selectedStack.orientation = NSUserInterfaceLayoutOrientationVertical; self.selectedStack.alignment = NSLayoutAttributeCenterX; self.selectedStack.spacing = 10; self.selectedStack.edgeInsets = NSEdgeInsetsMake(4, 4, 4, 4); self.selectedStack.translatesAutoresizingMaskIntoConstraints = NO;
     NSView *doc = [FPFlippedView new]; doc.translatesAutoresizingMaskIntoConstraints = NO; [doc addSubview:self.selectedStack];
@@ -265,15 +276,23 @@
     NSView *v = [NSView new]; v.wantsLayer = YES; v.layer.backgroundColor = NSColor.windowBackgroundColor.CGColor;
     self.titleLabel = [self label:@"動画を選択" size:14 weight:NSFontWeightSemibold];
     self.sourceLabel = [self label:@"iPhone / Mac 両対応" size:11 weight:NSFontWeightRegular]; self.sourceLabel.textColor = NSColor.secondaryLabelColor;
-    NSStackView *labels = [NSStackView stackViewWithViews:@[self.titleLabel, self.sourceLabel]]; labels.orientation = NSUserInterfaceLayoutOrientationVertical; labels.alignment = NSLayoutAttributeLeading; labels.spacing = 2;
+    self.sourceLoadingIndicator = [NSProgressIndicator new]; self.sourceLoadingIndicator.style = NSProgressIndicatorStyleSpinning; self.sourceLoadingIndicator.controlSize = NSControlSizeSmall; self.sourceLoadingIndicator.indeterminate = YES; self.sourceLoadingIndicator.hidden = YES;
+    NSStackView *sourceStatus = [NSStackView stackViewWithViews:@[self.sourceLoadingIndicator, self.sourceLabel]]; sourceStatus.alignment = NSLayoutAttributeCenterY; sourceStatus.spacing = 5;
+    NSStackView *labels = [NSStackView stackViewWithViews:@[self.titleLabel, sourceStatus]]; labels.orientation = NSUserInterfaceLayoutOrientationVertical; labels.alignment = NSLayoutAttributeLeading; labels.spacing = 2;
     NSStackView *actions = [NSStackView stackViewWithViews:@[[self button:@"iPhoneの最新録画" symbol:@"iphone" action:@selector(openLatest:)], [self button:@"Macの最新動画" symbol:@"macbook" action:@selector(openLatestMac:)], [self button:@"Finderで選択" symbol:@"folder" action:@selector(openLocal:)]]]; actions.spacing = 10;
     labels.translatesAutoresizingMaskIntoConstraints = NO; actions.translatesAutoresizingMaskIntoConstraints = NO; [v addSubview:labels]; [v addSubview:actions];
     [NSLayoutConstraint activateConstraints:@[[labels.leadingAnchor constraintEqualToAnchor:v.leadingAnchor constant:16], [labels.centerYAnchor constraintEqualToAnchor:v.centerYAnchor], [actions.trailingAnchor constraintEqualToAnchor:v.trailingAnchor constant:-16], [actions.centerYAnchor constraintEqualToAnchor:v.centerYAnchor], [labels.trailingAnchor constraintLessThanOrEqualToAnchor:actions.leadingAnchor constant:-12]]]; return v;
 }
 
+- (void)setSourceLoading:(BOOL)loading {
+    if (!self.sourceLoadingIndicator) return;
+    if (loading) { self.sourceLoadingIndicator.hidden = NO; [self.sourceLoadingIndicator startAnimation:nil]; }
+    else { [self.sourceLoadingIndicator stopAnimation:nil]; self.sourceLoadingIndicator.hidden = YES; }
+}
+
 - (FPDropView *)videoArea {
     FPDropView *v = [FPDropView new]; v.wantsLayer = YES; v.layer.backgroundColor = [NSColor colorWithWhite:0.06 alpha:1].CGColor;
-    self.playerView = [AVPlayerView new]; self.playerView.player = self.player; self.playerView.controlsStyle = AVPlayerViewControlsStyleFloating; self.playerView.videoGravity = AVLayerVideoGravityResizeAspect; self.playerView.hidden = YES;
+    self.playerView = [AVPlayerView new]; self.playerView.player = self.player; self.playerView.controlsStyle = AVPlayerViewControlsStyleNone; self.playerView.videoGravity = AVLayerVideoGravityResizeAspect; self.playerView.hidden = YES;
     self.emptyLabel = [self label:@"動画を開く\niPhoneの画面収録、またはMac上の動画を選択してください。\n動画ファイルはここへドロップできます。" size:15 weight:NSFontWeightRegular]; self.emptyLabel.textColor = NSColor.whiteColor; self.emptyLabel.alignment = NSTextAlignmentCenter; self.emptyLabel.maximumNumberOfLines = 4;
     self.playerView.translatesAutoresizingMaskIntoConstraints = NO; self.emptyLabel.translatesAutoresizingMaskIntoConstraints = NO; [v addSubview:self.playerView]; [v addSubview:self.emptyLabel];
     [NSLayoutConstraint activateConstraints:@[[self.playerView.topAnchor constraintEqualToAnchor:v.topAnchor], [self.playerView.leadingAnchor constraintEqualToAnchor:v.leadingAnchor], [self.playerView.trailingAnchor constraintEqualToAnchor:v.trailingAnchor], [self.playerView.bottomAnchor constraintEqualToAnchor:v.bottomAnchor], [self.emptyLabel.centerXAnchor constraintEqualToAnchor:v.centerXAnchor], [self.emptyLabel.centerYAnchor constraintEqualToAnchor:v.centerYAnchor]]];
@@ -283,10 +302,11 @@
 - (NSView *)controls {
     NSView *v = [NSView new]; v.wantsLayer = YES; v.layer.backgroundColor = NSColor.controlBackgroundColor.CGColor;
     NSButton *back = [self icon:@"backward.frame.fill" action:@selector(back:) help:@"1フレーム戻る"];
+    self.playPauseButton = [self icon:@"play.fill" action:@selector(togglePlayback:) help:@"再生"];
     NSButton *forward = [self icon:@"forward.frame.fill" action:@selector(forward:) help:@"1フレーム進む"];
     self.slider = [NSSlider new]; self.slider.minValue = 0; self.slider.maxValue = 1; self.slider.target = self; self.slider.action = @selector(seek:); self.slider.continuous = YES;
     self.timeLabel = [self label:@"00:00 / 00:00" size:11 weight:NSFontWeightRegular]; self.timeLabel.font = [NSFont monospacedDigitSystemFontOfSize:11 weight:NSFontWeightRegular]; self.timeLabel.alignment = NSTextAlignmentRight;
-    NSStackView *stack = [NSStackView stackViewWithViews:@[back, self.slider, self.timeLabel, forward]]; stack.spacing = 12; stack.alignment = NSLayoutAttributeCenterY; stack.translatesAutoresizingMaskIntoConstraints = NO; [v addSubview:stack];
+    NSStackView *stack = [NSStackView stackViewWithViews:@[back, self.playPauseButton, self.slider, self.timeLabel, forward]]; stack.spacing = 12; stack.alignment = NSLayoutAttributeCenterY; stack.translatesAutoresizingMaskIntoConstraints = NO; [v addSubview:stack];
     [self.timeLabel.widthAnchor constraintEqualToConstant:88].active = YES; [self.slider.widthAnchor constraintGreaterThanOrEqualToConstant:180].active = YES; [self.slider setContentHuggingPriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
     [NSLayoutConstraint activateConstraints:@[[stack.leadingAnchor constraintEqualToAnchor:v.leadingAnchor constant:14], [stack.trailingAnchor constraintEqualToAnchor:v.trailingAnchor constant:-14], [stack.centerYAnchor constraintEqualToAnchor:v.centerYAnchor]]]; return v;
 }
@@ -342,7 +362,7 @@
     }
     [self photoError];
 }
-- (void)photoError { [self error:@"写真へのアクセスが必要です。システム設定の「プライバシーとセキュリティ」→「写真」でFramePickerを許可してください。"]; }
+- (void)photoError { [self setSourceLoading:NO]; self.sourceLabel.stringValue = @"iPhone動画を読み込めませんでした"; [self error:@"写真へのアクセスが必要です。システム設定の「プライバシーとセキュリティ」→「写真」でFramePickerを許可してください。"]; }
 - (BOOL)isScreenRecordingAsset:(PHAsset *)asset {
     for (PHAssetResource *resource in [PHAssetResource assetResourcesForAsset:asset]) {
         NSString *name = resource.originalFilename.lowercaseString;
@@ -355,32 +375,80 @@
     }
     return NO;
 }
+- (void)failLatestVideoRequest:(NSUInteger)generation message:(NSString *)message {
+    if (generation != self.latestVideoRequestGeneration) return;
+    self.latestVideoRequestGeneration += 1;
+    PHImageRequestID requestID = self.latestVideoRequestID;
+    self.latestVideoRequestID = PHInvalidImageRequestID;
+    if (requestID != PHInvalidImageRequestID) [[PHImageManager defaultManager] cancelImageRequest:requestID];
+    [self setSourceLoading:NO];
+    self.sourceLabel.stringValue = @"iPhone動画を読み込めませんでした";
+    [self error:message];
+}
+- (void)scheduleLatestVideoInactivityTimeoutForRequestGeneration:(NSUInteger)generation activityGeneration:(NSUInteger)activityGeneration {
+    __weak typeof(self) weak = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(30 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        typeof(self) strong = weak;
+        if (!strong || generation != strong.latestVideoRequestGeneration || activityGeneration != strong.latestVideoActivityGeneration) return;
+        [strong failLatestVideoRequest:generation message:FPLatestVideoFailureMessage(nil, nil, YES)];
+    });
+}
 - (void)fetchLatest {
+    [self setSourceLoading:YES];
+    self.latestVideoRequestGeneration += 1;
+    NSUInteger generation = self.latestVideoRequestGeneration;
+    self.latestVideoActivityGeneration += 1;
+    if (self.latestVideoRequestID != PHInvalidImageRequestID) [[PHImageManager defaultManager] cancelImageRequest:self.latestVideoRequestID];
+    self.latestVideoRequestID = PHInvalidImageRequestID;
     self.sourceLabel.stringValue = @"iPhoneの画面収録を検索中…";
     PHFetchOptions *o = [PHFetchOptions new]; o.sortDescriptors = @[[NSSortDescriptor sortDescriptorWithKey:@"creationDate" ascending:NO]];
     PHFetchResult<PHAsset *> *assets = [PHAsset fetchAssetsWithMediaType:PHAssetMediaTypeVideo options:o]; __block PHAsset *latest = nil;
     [assets enumerateObjectsUsingBlock:^(PHAsset *a, NSUInteger i, BOOL *stop){ if ([self isScreenRecordingAsset:a]) { latest = a; *stop = YES; } }];
     if (!latest && assets.count > 0) latest = [assets objectAtIndex:0];
-    if (!latest) { self.sourceLabel.stringValue = @"iPhone / Mac 両対応"; [self error:@"写真ライブラリに画面収録が見つかりませんでした。iPhone側のiCloud写真の同期完了後に再試行してください。"]; return; }
+    if (!latest) { [self setSourceLoading:NO]; self.sourceLabel.stringValue = @"iPhone動画が見つかりませんでした"; [self error:@"写真ライブラリに動画が見つかりませんでした。iPhone側のiCloud写真の同期完了後に再試行してください。"]; return; }
     PHVideoRequestOptions *o2 = [PHVideoRequestOptions new]; o2.version = PHVideoRequestOptionsVersionOriginal; o2.deliveryMode = PHVideoRequestOptionsDeliveryModeHighQualityFormat; o2.networkAccessAllowed = YES;
-    __weak typeof(self) weak = self; [[PHImageManager defaultManager] requestAVAssetForVideo:latest options:o2 resultHandler:^(AVAsset *asset, AVAudioMix *mix, NSDictionary *info){ dispatch_async(dispatch_get_main_queue(), ^{
-        NSError *e = info[PHImageErrorKey]; if (e || !asset) { [weak error:e ? [NSString stringWithFormat:@"iCloudから画面収録を取得できませんでした。\n%@", e.localizedDescription] : @"画面収録の動画データを取得できませんでした。"]; return; }
+    self.sourceLabel.stringValue = @"iCloudから最新動画を読み込み中…";
+    __weak typeof(self) weak = self;
+    o2.progressHandler = ^(double progress, NSError *progressError, BOOL *stop, NSDictionary *info) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            typeof(self) strong = weak;
+            if (!strong || generation != strong.latestVideoRequestGeneration) return;
+            if (progressError) {
+                [strong failLatestVideoRequest:generation message:FPLatestVideoFailureMessage(@{PHImageErrorKey: progressError}, nil, NO)];
+                return;
+            }
+            strong.sourceLabel.stringValue = [NSString stringWithFormat:@"iCloudから最新動画を読み込み中… %ld%%", (long)lrint(progress * 100.0)];
+            strong.latestVideoActivityGeneration += 1;
+            [strong scheduleLatestVideoInactivityTimeoutForRequestGeneration:generation activityGeneration:strong.latestVideoActivityGeneration];
+        });
+    };
+    self.latestVideoRequestID = [[PHImageManager defaultManager] requestAVAssetForVideo:latest options:o2 resultHandler:^(AVAsset *asset, AVAudioMix *mix, NSDictionary *info){ dispatch_async(dispatch_get_main_queue(), ^{
+        typeof(self) strong = weak;
+        if (!strong || generation != strong.latestVideoRequestGeneration) return;
+        if ([info[PHImageResultIsDegradedKey] boolValue] || ([info[PHImageResultIsInCloudKey] boolValue] && !asset && !info[PHImageErrorKey])) return;
+        NSString *failureMessage = FPLatestVideoFailureMessage(info, asset, NO); if (failureMessage) { [strong failLatestVideoRequest:generation message:failureMessage]; return; }
+        strong.latestVideoRequestGeneration += 1;
+        strong.latestVideoRequestID = PHInvalidImageRequestID;
         NSDateFormatter *f = [NSDateFormatter new]; f.locale = [NSLocale localeWithLocaleIdentifier:@"ja_JP"]; f.dateFormat = @"yyyy/MM/dd HH:mm の画面収録";
-        [weak loadAsset:asset title:latest.creationDate ? [f stringFromDate:latest.creationDate] : @"最新の画面収録" description:@"iPhoneの画面収録 • iCloud写真" sourceID:[@"photo:" stringByAppendingString:latest.localIdentifier] photoID:latest.localIdentifier];
+        [strong loadAsset:asset title:latest.creationDate ? [f stringFromDate:latest.creationDate] : @"最新の画面収録" description:@"iPhoneの画面収録 • iCloud写真" sourceID:[@"photo:" stringByAppendingString:latest.localIdentifier] photoID:latest.localIdentifier];
     }); }];
+    [self scheduleLatestVideoInactivityTimeoutForRequestGeneration:generation activityGeneration:self.latestVideoActivityGeneration];
 }
 
 - (void)loadAsset:(AVAsset *)asset title:(NSString *)title description:(NSString *)desc sourceID:(NSString *)sourceID photoID:(NSString *)photoID {
-    [self.player pause]; self.sourceLabel.stringValue = @"動画を準備中…"; __weak typeof(self) weak = self;
+    [self setSourceLoading:YES]; [self.player pause]; [self updatePlaybackButton]; self.sourceLabel.stringValue = @"動画を準備中…"; __weak typeof(self) weak = self;
     [asset loadValuesAsynchronouslyForKeys:@[@"duration"] completionHandler:^{ NSError *e = nil; AVKeyValueStatus s = [asset statusOfValueForKey:@"duration" error:&e]; dispatch_async(dispatch_get_main_queue(), ^{
-        double d = CMTimeGetSeconds(asset.duration); if (s != AVKeyValueStatusLoaded || !isfinite(d) || d <= 0) { [weak error:[NSString stringWithFormat:@"動画を開けませんでした。\n%@", e.localizedDescription ?: @"動画の長さを取得できません。"]]; return; }
+        double d = CMTimeGetSeconds(asset.duration); if (s != AVKeyValueStatusLoaded || !isfinite(d) || d <= 0) { [weak setSourceLoading:NO]; weak.sourceLabel.stringValue = @"動画を読み込めませんでした"; [weak error:[NSString stringWithFormat:@"動画を開けませんでした。\n%@", e.localizedDescription ?: @"動画の長さを取得できません。"]]; return; }
+        [weak setSourceLoading:NO];
         weak.asset = asset; weak.sourceID = sourceID; weak.photoAssetID = photoID; weak.duration = d; weak.slider.maxValue = d; weak.slider.doubleValue = 0; weak.titleLabel.stringValue = title; weak.sourceLabel.stringValue = desc; weak.playerView.hidden = NO; weak.emptyLabel.hidden = YES; [weak.player replaceCurrentItemWithPlayerItem:[AVPlayerItem playerItemWithAsset:asset]]; [weak restore]; [weak updateTime:0]; [weak generateTimelineForAsset:asset duration:d];
     }); }];
 }
 
 - (void)seek:(NSSlider *)sender { [self.player seekToTime:CMTimeMakeWithSeconds(sender.doubleValue, 600) toleranceBefore:kCMTimeZero toleranceAfter:kCMTimeZero]; [self updateTime:sender.doubleValue]; }
-- (void)back:(id)sender { [self.player pause]; [self.player.currentItem stepByCount:-1]; [self refreshTimelineSelectionAfterStep]; }
-- (void)forward:(id)sender { [self.player pause]; [self.player.currentItem stepByCount:1]; [self refreshTimelineSelectionAfterStep]; }
+- (void)togglePlayback:(id)sender { if (self.player.timeControlStatus == AVPlayerTimeControlStatusPaused) [self.player play]; else [self.player pause]; [self updatePlaybackButton]; }
+- (void)updatePlaybackButton { if (!self.playPauseButton) return; BOOL active = self.player.timeControlStatus != AVPlayerTimeControlStatusPaused; NSString *symbol = active ? @"pause.fill" : @"play.fill"; NSString *help = active ? @"一時停止" : @"再生"; self.playPauseButton.image = [NSImage imageWithSystemSymbolName:symbol accessibilityDescription:help]; self.playPauseButton.toolTip = help; }
+- (void)back:(id)sender { [self.player pause]; [self updatePlaybackButton]; [self.player.currentItem stepByCount:-1]; [self refreshTimelineSelectionAfterStep]; }
+- (void)forward:(id)sender { [self.player pause]; [self updatePlaybackButton]; [self.player.currentItem stepByCount:1]; [self refreshTimelineSelectionAfterStep]; }
 - (NSString *)time:(double)v { NSInteger s = isfinite(v) ? MAX(0, (NSInteger)floor(v)) : 0; return [NSString stringWithFormat:@"%02ld:%02ld", (long)(s/60), (long)(s%60)]; }
 - (void)updateTime:(double)s { if (!isfinite(s) || s < 0) s = 0; if (!self.slider.highlighted) self.slider.doubleValue = MIN(s, self.duration); self.timeLabel.stringValue = [NSString stringWithFormat:@"%@ / %@", [self time:s], [self time:self.duration]]; }
 - (NSImage *)imageAt:(double)seconds {
@@ -441,7 +509,7 @@
         [selected scrollRectToVisible:selected.bounds];
     }
     if (!shouldSeek) return;
-    double time = [self.timelineFrames[index][@"time"] doubleValue]; [self.player pause];
+    double time = [self.timelineFrames[index][@"time"] doubleValue]; [self.player pause]; [self updatePlaybackButton];
     [self.player seekToTime:CMTimeMakeWithSeconds(time, 600) toleranceBefore:kCMTimeZero toleranceAfter:kCMTimeZero completionHandler:^(BOOL finished){ dispatch_async(dispatch_get_main_queue(), ^{ [self updateTime:time]; }); }];
 }
 
@@ -497,7 +565,7 @@
     for (NSUInteger index = 0; index < self.timelineFrames.count; index++) { double delta = fabs([self.timelineFrames[index][@"time"] doubleValue] - time); if (delta < best) { best = delta; bestIndex = index; } }
     if (bestIndex != NSNotFound) [self setTimelineSelectionIndex:bestIndex seek:NO];
     [self updateCapturedSelectionVisual];
-    [self.player pause]; [self.player seekToTime:CMTimeMakeWithSeconds(time, 600) toleranceBefore:kCMTimeZero toleranceAfter:kCMTimeZero completionHandler:^(BOOL finished){ dispatch_async(dispatch_get_main_queue(), ^{ [self updateTime:time]; }); }];
+    [self.player pause]; [self updatePlaybackButton]; [self.player seekToTime:CMTimeMakeWithSeconds(time, 600) toleranceBefore:kCMTimeZero toleranceAfter:kCMTimeZero completionHandler:^(BOOL finished){ dispatch_async(dispatch_get_main_queue(), ^{ [self updateTime:time]; }); }];
 }
 - (void)clearCapturedSelection { self.selectedCapturedIndex = NSNotFound; [self.selectedCapturedIndexes removeAllIndexes]; [self updateCapturedSelectionVisual]; }
 - (void)updateCapturedSelectionVisual {
@@ -511,30 +579,33 @@
 - (void)persist { if (!self.sourceID) return; NSUserDefaults *d=NSUserDefaults.standardUserDefaults; NSMutableDictionary *s=[[d dictionaryForKey:@"capturedSessions.v1"] mutableCopy]?:[NSMutableDictionary dictionary]; NSMutableArray *t=[NSMutableArray array]; for (NSDictionary *f in self.frames) [t addObject:f[@"time"]]; s[self.sourceID]=t; [d setObject:s forKey:@"capturedSessions.v1"]; }
 - (void)restore { [self.frames removeAllObjects]; NSArray *times=[NSUserDefaults.standardUserDefaults dictionaryForKey:@"capturedSessions.v1"][self.sourceID]; for (NSNumber *t in times) { if (t.doubleValue>self.duration) continue; NSImage *i=[self imageAt:t.doubleValue]; if (i) [self.frames addObject:@{@"time":t,@"image":i}]; } [self rebuild]; }
 
-- (NSData *)pngDataForImage:(NSImage *)image {
-    NSBitmapImageRep *rep = [NSBitmapImageRep imageRepWithData:image.TIFFRepresentation];
-    return [rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
+- (void)setCopyLoading:(BOOL)loading {
+    self.copyInProgress = loading;
+    if (loading) { self.clipboardLoadingIndicator.hidden = NO; [self.clipboardLoadingIndicator startAnimation:nil]; self.clipboardButton.enabled = NO; }
+    else { [self.clipboardLoadingIndicator stopAnimation:nil]; self.clipboardLoadingIndicator.hidden = YES; self.clipboardButton.enabled = self.frames.count > 0; }
 }
 
-- (NSString *)svgForImages:(NSArray<NSImage *> *)images {
-    NSMutableArray<NSDictionary *> *items = [NSMutableArray arrayWithCapacity:images.count]; CGFloat totalWidth = 0, maxHeight = 0, gap = 40;
-    for (NSImage *image in images) {
-        NSData *png = [self pngDataForImage:image]; NSBitmapImageRep *rep = [NSBitmapImageRep imageRepWithData:png]; if (!png || !rep) continue;
-        CGFloat width = rep.pixelsWide, height = rep.pixelsHigh; [items addObject:@{@"png":png, @"width":@(width), @"height":@(height)}]; totalWidth += width; maxHeight = MAX(maxHeight, height);
-    }
-    if (!items.count) return nil; totalWidth += gap * (items.count - 1);
-    NSMutableString *svg = [NSMutableString stringWithFormat:@"<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" width=\"%.0f\" height=\"%.0f\" viewBox=\"0 0 %.0f %.0f\">", totalWidth, maxHeight, totalWidth, maxHeight]; __block CGFloat x = 0;
-    [items enumerateObjectsUsingBlock:^(NSDictionary *item, NSUInteger index, BOOL *stop) { CGFloat width=[item[@"width"] doubleValue], height=[item[@"height"] doubleValue]; NSString *base64=[item[@"png"] base64EncodedStringWithOptions:0]; [svg appendFormat:@"<g id=\"frame-%03lu\"><image x=\"%.0f\" y=\"0\" width=\"%.0f\" height=\"%.0f\" xlink:href=\"data:image/png;base64,%@\"/></g>",(unsigned long)index+1,x,width,height,base64]; x += width + gap; }];
-    [svg appendString:@"</svg>"]; return svg;
+- (NSArray *)cgImagesForImages:(NSArray<NSImage *> *)images {
+    NSMutableArray *cgImages = [NSMutableArray arrayWithCapacity:images.count];
+    for (NSImage *image in images) { NSRect rect = NSMakeRect(0, 0, image.size.width, image.size.height); CGImageRef cgImage = [image CGImageForProposedRect:&rect context:nil hints:nil]; if (cgImage) [cgImages addObject:CFBridgingRelease(CGImageRetain(cgImage))]; }
+    return cgImages;
 }
 
-- (BOOL)writeImagesToPasteboard:(NSArray<NSImage *> *)images {
-    if (!images.count) { NSBeep(); return NO; }
-    NSPasteboard *pasteboard = NSPasteboard.generalPasteboard; [pasteboard clearContents];
-    if (images.count == 1) { BOOL copied = [pasteboard writeObjects:@[images.firstObject]]; if (copied) [self showCopyConfirmation]; return copied; }
-    NSString *svg = [self svgForImages:images]; if (!svg) { NSBeep(); return NO; }
-    NSPasteboardItem *item = [NSPasteboardItem new]; NSData *svgData = [svg dataUsingEncoding:NSUTF8StringEncoding];
-    [item setData:svgData forType:@"public.svg-image"]; [item setString:svg forType:NSPasteboardTypeString]; [item setString:[NSString stringWithFormat:@"<html><body>%@</body></html>",svg] forType:NSPasteboardTypeHTML]; BOOL copied = [pasteboard writeObjects:@[item]]; if (copied) [self showCopyConfirmation]; return copied;
+- (BOOL)writeClipboardPayload:(FPClipboardPayload *)payload toPasteboard:(NSPasteboard *)pasteboard {
+    if (!payload.primaryData.length) return NO;
+    NSPasteboardItem *item = [NSPasteboardItem new]; [item setData:payload.primaryData forType:payload.primaryType];
+    if (payload.plainText) [item setString:payload.plainText forType:NSPasteboardTypeString];
+    if (payload.html) [item setString:payload.html forType:NSPasteboardTypeHTML];
+    [pasteboard clearContents]; return [pasteboard writeObjects:@[item]];
+}
+
+- (void)copyCGImages:(NSArray *)cgImages toPasteboard:(NSPasteboard *)pasteboard completion:(void (^)(BOOL copied))completion {
+    if (!cgImages.count) { [self setCopyLoading:NO]; if (completion) completion(NO); return; }
+    [self setCopyLoading:YES]; __weak typeof(self) weak = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        FPClipboardPayload *payload = FPCreateClipboardPayload(cgImages);
+        dispatch_async(dispatch_get_main_queue(), ^{ BOOL copied = payload && [weak writeClipboardPayload:payload toPasteboard:pasteboard]; [weak setCopyLoading:NO]; if (completion) completion(copied); });
+    });
 }
 
 - (void)showCopyConfirmation {
@@ -545,17 +616,25 @@
 }
 
 - (void)copySelectedFrames:(id)sender {
-    NSMutableArray<NSImage *> *images = [NSMutableArray array];
-    if (self.selectedCapturedIndexes.count) [self.selectedCapturedIndexes enumerateIndexesUsingBlock:^(NSUInteger index, BOOL *stop) { if (index < self.frames.count) [images addObject:self.frames[index][@"image"]]; }];
-    else if (self.selectedTimelineIndex >= 0 && self.selectedTimelineIndex < self.timelineFrames.count) { double time = [self.timelineFrames[self.selectedTimelineIndex][@"time"] doubleValue]; NSImage *fullResolutionImage = [self imageAt:time]; if (fullResolutionImage) [images addObject:fullResolutionImage]; }
-    if (!images.count) { NSBeep(); return; }
-    [self writeImagesToPasteboard:images];
+    if (self.copyInProgress) return;
+    void (^finished)(BOOL) = ^(BOOL copied) { if (copied) [self showCopyConfirmation]; else NSBeep(); };
+    if (self.selectedCapturedIndexes.count) {
+        NSMutableArray<NSImage *> *images = [NSMutableArray array]; [self.selectedCapturedIndexes enumerateIndexesUsingBlock:^(NSUInteger index, BOOL *stop) { if (index < self.frames.count) [images addObject:self.frames[index][@"image"]]; }];
+        NSArray *cgImages = [self cgImagesForImages:images]; if (!cgImages.count) { NSBeep(); return; } [self copyCGImages:cgImages toPasteboard:NSPasteboard.generalPasteboard completion:finished]; return;
+    }
+    if (self.selectedTimelineIndex < 0 || self.selectedTimelineIndex >= self.timelineFrames.count || !self.asset) { NSBeep(); return; }
+    double time = [self.timelineFrames[self.selectedTimelineIndex][@"time"] doubleValue]; AVAsset *asset = self.asset; [self setCopyLoading:YES]; __weak typeof(self) weak = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        AVAssetImageGenerator *generator = [[AVAssetImageGenerator alloc] initWithAsset:asset]; generator.appliesPreferredTrackTransform = YES; generator.apertureMode = AVAssetImageGeneratorApertureModeCleanAperture; generator.requestedTimeToleranceBefore = kCMTimeZero; generator.requestedTimeToleranceAfter = kCMTimeZero;
+        CGImageRef image = [generator copyCGImageAtTime:CMTimeMakeWithSeconds(time, 600) actualTime:NULL error:nil]; id retainedImage = image ? CFBridgingRelease(image) : nil;
+        dispatch_async(dispatch_get_main_queue(), ^{ if (!retainedImage) { [weak setCopyLoading:NO]; NSBeep(); return; } [weak copyCGImages:@[retainedImage] toPasteboard:NSPasteboard.generalPasteboard completion:finished]; });
+    });
 }
 
 - (void)copyAllFrames:(id)sender {
-    NSMutableArray<NSImage *> *images = [NSMutableArray arrayWithCapacity:self.frames.count];
-    for (NSDictionary *frame in self.frames) { NSImage *image = frame[@"image"]; if (image) [images addObject:image]; }
-    [self writeImagesToPasteboard:images];
+    if (self.copyInProgress) return; NSMutableArray<NSImage *> *images = [NSMutableArray arrayWithCapacity:self.frames.count]; for (NSDictionary *frame in self.frames) { NSImage *image = frame[@"image"]; if (image) [images addObject:image]; }
+    NSArray *cgImages = [self cgImagesForImages:images]; if (!cgImages.count) { NSBeep(); return; }
+    [self copyCGImages:cgImages toPasteboard:NSPasteboard.generalPasteboard completion:^(BOOL copied) { if (copied) [self showCopyConfirmation]; else NSBeep(); }];
 }
 
 - (NSURL *)defaultExportParentURL {
