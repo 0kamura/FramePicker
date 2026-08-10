@@ -72,6 +72,13 @@
 - (BOOL)isFlipped { return YES; }
 @end
 
+@interface FPTimelineCapturedBadgeView : NSView
+@end
+
+@implementation FPTimelineCapturedBadgeView
+- (NSView *)hitTest:(NSPoint)point { return nil; }
+@end
+
 @interface FPHoverCardView : NSView
 @property NSView *controls;
 @property NSTrackingArea *hoverTrackingArea;
@@ -483,7 +490,26 @@
     NSButton *button = [NSButton buttonWithImage:image target:self action:@selector(selectTimeline:)];
     button.tag = index; button.imagePosition = NSImageOnly; button.imageScaling = NSImageScaleProportionallyUpOrDown; button.bordered = NO;
     button.wantsLayer = YES; button.layer.backgroundColor = NSColor.clearColor.CGColor; button.layer.borderWidth = index == self.selectedTimelineIndex ? 3 : 0; button.layer.borderColor = NSColor.systemBlueColor.CGColor;
+    FPTimelineCapturedBadgeView *badge = [FPTimelineCapturedBadgeView new]; badge.wantsLayer = YES; badge.layer.backgroundColor = [NSColor.systemBlueColor colorWithAlphaComponent:.24].CGColor; badge.hidden = YES;
+    NSTextField *label = [self label:@"選択中" size:11 weight:NSFontWeightSemibold]; label.textColor = NSColor.systemBlueColor; label.alignment = NSTextAlignmentCenter;
+    badge.translatesAutoresizingMaskIntoConstraints = NO; label.translatesAutoresizingMaskIntoConstraints = NO; [badge addSubview:label]; [button addSubview:badge];
+    [NSLayoutConstraint activateConstraints:@[[badge.topAnchor constraintEqualToAnchor:button.topAnchor], [badge.leadingAnchor constraintEqualToAnchor:button.leadingAnchor], [badge.trailingAnchor constraintEqualToAnchor:button.trailingAnchor], [badge.bottomAnchor constraintEqualToAnchor:button.bottomAnchor], [label.centerXAnchor constraintEqualToAnchor:badge.centerXAnchor], [label.centerYAnchor constraintEqualToAnchor:badge.centerYAnchor]]];
     [button.widthAnchor constraintEqualToConstant:width].active = YES; [button.heightAnchor constraintEqualToConstant:height].active = YES; return button;
+}
+
+- (NSIndexSet *)capturedTimelineIndexes {
+    NSMutableIndexSet *indexes = [NSMutableIndexSet indexSet];
+    for (NSDictionary *capturedFrame in self.frames) {
+        double capturedTime = [capturedFrame[@"time"] doubleValue], bestDelta = DBL_MAX; NSInteger bestIndex = NSNotFound;
+        for (NSUInteger index = 0; index < self.timelineFrames.count; index++) { double delta = fabs([self.timelineFrames[index][@"time"] doubleValue] - capturedTime); if (delta < bestDelta) { bestDelta = delta; bestIndex = index; } }
+        if (bestIndex != NSNotFound) [indexes addIndex:bestIndex];
+    }
+    return indexes;
+}
+
+- (void)updateTimelineCapturedIndicators {
+    NSIndexSet *capturedIndexes = [self capturedTimelineIndexes];
+    [self.sequence.arrangedSubviews enumerateObjectsUsingBlock:^(NSView *card, NSUInteger index, BOOL *stop) { for (NSView *subview in card.subviews) if ([subview isKindOfClass:FPTimelineCapturedBadgeView.class]) { subview.hidden = ![capturedIndexes containsIndex:index]; break; } }];
 }
 
 - (void)rebuildTimeline {
@@ -492,7 +518,7 @@
         NSString *text = self.asset ? @"動画からフレームを自動生成中…" : @"動画を開くと、選択用のフレームが自動で並びます。";
         NSTextField *empty = [self label:text size:12 weight:NSFontWeightRegular]; empty.textColor = NSColor.secondaryLabelColor; [empty.widthAnchor constraintGreaterThanOrEqualToConstant:420].active = YES; [self.sequence addArrangedSubview:empty]; return;
     }
-    [self.timelineFrames enumerateObjectsUsingBlock:^(NSDictionary *frame, NSUInteger index, BOOL *stop){ [self.sequence addArrangedSubview:[self timelineCard:frame index:index]]; }];
+    [self.timelineFrames enumerateObjectsUsingBlock:^(NSDictionary *frame, NSUInteger index, BOOL *stop){ [self.sequence addArrangedSubview:[self timelineCard:frame index:index]]; }]; [self updateTimelineCapturedIndicators];
 }
 
 - (void)selectTimeline:(NSButton *)sender {
@@ -549,6 +575,7 @@
     if (!self.frames.count) { NSTextField *e = [self label:@"下のフレーム列から選択してください。" size:12 weight:NSFontWeightRegular]; e.textColor = NSColor.secondaryLabelColor; e.maximumNumberOfLines = 2; [e.widthAnchor constraintEqualToConstant:180].active = YES; [self.selectedStack addArrangedSubview:e]; }
     else [self.frames enumerateObjectsUsingBlock:^(NSDictionary *f, NSUInteger i, BOOL *stop){ [self.selectedStack addArrangedSubview:[self card:f index:i]]; }];
     self.countLabel.stringValue = [NSString stringWithFormat:@"%lu枚", (unsigned long)self.frames.count]; self.exportButton.enabled = self.frames.count > 0; self.clipboardButton.enabled = self.frames.count > 0;
+    [self updateTimelineCapturedIndicators];
 }
 - (void)up:(NSButton *)b { [self move:b.tag offset:-1]; } - (void)down:(NSButton *)b { [self move:b.tag offset:1]; }
 - (void)selectCaptured:(NSButton *)button {
